@@ -70,7 +70,9 @@ class ThreadContext(local):
 
         for key, value in vars(self).items():
             compressed = [v for v in value if v]
-            data[key] = compressed[-1]
+
+            if len(compressed) > 0:
+                data[key] = compressed[-1]
 
         return data
 
