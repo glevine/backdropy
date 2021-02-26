@@ -1,4 +1,4 @@
-from .context import push, pop
+from .context import Context
 
 
 def contextual(get_response):
@@ -8,9 +8,9 @@ def contextual(get_response):
 
     def middleware(request):
         try:
-            push(request=request)
+            Context.push(request=request)
             return get_response(request)
         finally:
-            pop()
+            Context.pop()
 
     return middleware

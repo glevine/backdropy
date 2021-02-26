@@ -1,76 +1,82 @@
-from collections import UserDict
 from contextlib import contextmanager
-from copy import deepcopy
 from functools import wraps
 from threading import local
 
-# The current context is synchronized to thread-local storage.
-Vars = local()
 
-
-class Context(UserDict):
+class ThreadContext(local):
     """
-    The context stack is made up of contexts derived from other contexts. A
-    single context contains its own information, as well as the information from
-    all contexts that came before it.
+    All context is managed through thread-local data. There is always one active
+    context per thread but additional contexts may be derived from the active
+    context. When a child context is created it becomes the active context.
+
+    The active context contains its own information, as well as the information
+    from all contexts that came before it. Use `Context.data` to access the
+    context instead of `vars(Context)` or `Context.__dict__`.
+
+    Deleting data is not supported. Create a child context using
+    `Context.push()` (or `scope()`) to add temporary context that can be removed
+    using `Context.pop()`.
     """
 
-    def __init__(self, parent, *args, **kwargs):
-        if parent is not None:
-            data = deepcopy(parent.data)
-            kwargs = {**data, **kwargs}
-
-        super().__init__(*args, **kwargs)
-        self.parent = parent
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        setattr(Vars, key, value)
-
-    def __delitem__(self, key):
+    def push(self, **kwargs):
         """
-        Deleting variables is not supported.
-
-        Derive a child context using push (or the scope context manager) to add
-        temporary context that can be removed using pop.
+        Create a child context.
         """
-        pass
+
+        # Add a new context to the stack. The parent context's values are
+        # preserved beneath the child context. The None's will be removed from
+        # the stack when the context is removed, revealing the parent context's
+        # data untouched.
+        for value in vars(self).values():
+            value.append(None)
+
+        # Set the values for the new context.
+        self.add(**kwargs)
+
+    def pop(self):
+        """
+        Remove the current context, thus restoring its parent context.
+        """
+
+        # Remove the current context from the stack.
+        for key, value in vars(self).items():
+            try:
+                value.pop()
+            except IndexError:
+                pass
+            finally:
+                # There is no need for this attribute anymore.
+                if len(value) == 0:
+                    delattr(self, key)
+
+    def add(self, **kwargs):
+        """
+        Add information to the current context. Data is overwritten when key
+        collisions occur.
+        """
+
+        for key, value in kwargs.items():
+            attr = getattr(self, key, [])
+            attr.append(value)
+            setattr(self, key, attr)
+
+    @property
+    def data(self) -> dict:
+        """
+        Return all information from the current context.
+        """
+
+        data = {}
+
+        for key, value in vars(self).items():
+            compressed = [v for v in value if v]
+            data[key] = compressed[-1]
+
+        return data
 
 
-# The context at the top of the stack.
-Current = Context(None)
-
-
-def push(**kwargs) -> Context:
-    """
-    Create a child context.
-    """
-    global Current
-    Current = Context(Current, kwargs)
-    return Current
-
-
-def pop():
-    """
-    Remove the current context, thus restoring its parent context.
-    """
-    global Current
-
-    def rebuild_vars(ctx: Context):
-        Vars.__dict__.clear()
-        for key, value in vars(ctx.data):
-            setattr(Vars, key, value)
-
-    if Current.parent is not None:
-        Current = Current.parent
-        rebuild_vars(Current)
-
-
-def add(**kwargs):
-    """
-    Adds information to the current context.
-    """
-    Current.update(kwargs)
+# Initialize the context.
+Context = ThreadContext()
 
 
 def contextual(fn, **vars):
@@ -82,10 +88,10 @@ def contextual(fn, **vars):
     @wraps(fn)
     def decorator(*args, **kwargs):
         try:
-            push(**vars)
+            Context.push(**vars)
             return fn(*args, **kwargs)
         finally:
-            pop()
+            Context.pop()
 
     return decorator
 
@@ -98,18 +104,18 @@ def scope(**vars):
 
     with scope(answer=42) as ctx:
         answer = Answers.load(answer=42)
-        ctx.update(name=answer.name, source=answer.source)
+        ctx.add(name=answer.name, source=answer.source)
         logger.info('generate question') # [answer=42][name=Ultimate Question][source=Deep Thought] generate question
         with scope(task='generate_question') as inner_ctx:
             earth = SuperComputers.create(name='Earth')
-            inner_ctx['source'] = earth.name
+            inner_ctx.add(source=earth.name)
             question = earth.produce(answer.answer)
             logger.info(f'question: {question}') # [answer=42][name=Ultimate Question][source=Earth] question: ???
         logger.info('question generated') # [answer=42][name=Ultimate Question][source=Deep Thought] question generated
     """
 
     try:
-        ctx = push(**vars)
-        yield ctx
+        Context.push(**vars)
+        yield Context
     finally:
-        pop()
+        Context.pop()
